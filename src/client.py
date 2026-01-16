@@ -23,7 +23,7 @@ Commands (after login):
 
 Notes:
 - Private keys are stored in ./keys/<username>_private.json (AES-CTR + HMAC, key derived from password).
-- Group keys are stored in ./keys/<username>_groupkeys.json.
+- Group keys are stored in ./keys/<username>_groupkeys.json (AES-CTR + HMAC, key derived from password).
 """
 from __future__ import annotations
 
@@ -49,9 +49,10 @@ from . import crypto
 # Local storage
 # -----------------------------
 class LocalStore:
-    def __init__(self, base_dir: Path, username: str):
+    def __init__(self, base_dir: Path, username: str, password: Optional[str] = None):
         self.base_dir = base_dir
         self.username = username
+        self.password = password
         self.keys_dir = base_dir / "keys"
         self.keys_dir.mkdir(parents=True, exist_ok=True)
         self.priv_path = self.keys_dir / f"{username}_private.json"
@@ -78,11 +79,21 @@ class LocalStore:
     def load_groupkeys(self) -> Dict[str, Any]:
         if not self.groupkeys_path.exists():
             return {"groups": {}}
-        return json.loads(self.groupkeys_path.read_text(encoding="utf-8"))
+        raw = json.loads(self.groupkeys_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and "groups" in raw:
+            return raw
+        if not self.password:
+            raise RuntimeError("Password required to decrypt group keys")
+        blob = crypto.unwrap_blob_with_password(self.password, raw)
+        return json.loads(blob.decode("utf-8"))
 
     def save_groupkeys(self, data: Dict[str, Any]) -> None:
+        if not self.password:
+            raise RuntimeError("Password required to encrypt group keys")
         tmp = self.groupkeys_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        blob = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+        wrapped = crypto.wrap_blob_with_password(self.password, blob, aad=b"ECHO-GROUPKEYS")
+        tmp.write_text(json.dumps(wrapped, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self.groupkeys_path)
 
     def set_group_key(self, group_id: str, epoch: int, key: bytes) -> None:
@@ -496,7 +507,7 @@ class EchoverClient:
             print(f"[!] Failed decrypting group message: {e}")
 
     def register(self, username: str, password: str) -> None:
-        self.store = LocalStore(self.base_dir, username)
+        self.store = LocalStore(self.base_dir, username, password=password)
         if self.store.priv_path.exists():
             raise RuntimeError("Private key already exists locally for this username (delete ./keys/ to re-register)")
 
@@ -518,7 +529,7 @@ class EchoverClient:
 
     def login(self, username: str, password: str) -> None:
         self.username = username
-        self.store = LocalStore(self.base_dir, username)
+        self.store = LocalStore(self.base_dir, username, password=password)
         if not self.store.priv_path.exists():
             raise RuntimeError("No local private key found. Register first (same working directory).")
 
